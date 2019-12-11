@@ -1,33 +1,30 @@
-package com.laymain.kafkatool.plugin;
+package com.kafkatool;
 
 import com.kafkatool.external.ICustomMessageDecorator;
 import com.kafkatool.ui.MainFrame;
-import io.confluent.kafka.schemaregistry.client.CachedSchemaRegistryClient;
-import io.confluent.kafka.serializers.KafkaAvroDeserializer;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.avro.Schema;
+import org.apache.avro.generic.GenericDatumReader;
+import org.apache.avro.generic.GenericRecord;
+import org.apache.avro.io.BinaryDecoder;
+import org.apache.avro.io.DatumReader;
+import org.apache.avro.io.DecoderFactory;
 
 import javax.swing.*;
 import java.awt.*;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
+import java.io.*;
+// import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.Arrays;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Properties;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
+
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class AvroCustomMessageDecorator implements ICustomMessageDecorator {
-
-    private static final Logger LOGGER = LoggerFactory.getLogger(AvroCustomMessageDecorator.class);
-    private static final String DISPLAY_NAME = "Avro";
+    private static final String DISPLAY_NAME = "AvroVsF";
     private static final String PROPERTIES_FILE = String.join(File.separator, System.getProperty("user.home"), ".com.laymain.kafkatool.plugin.avro.properties");
     private static final Properties SCHEMA_REGISTY_ENDPOINTS = loadProperties();
-
-    private final ConcurrentMap<String, KafkaAvroDeserializer> deserializers = new ConcurrentHashMap<>();
     private final AtomicBoolean configurationDialogOpened = new AtomicBoolean(false);
     private final AtomicBoolean menuBarInjectionDone = new AtomicBoolean(false);
 
@@ -39,18 +36,28 @@ public class AvroCustomMessageDecorator implements ICustomMessageDecorator {
     @Override
     public String decorate(String zookeeperHost, String brokerHost, String topic, long partitionId, long offset, byte[] bytes, Map<String, String> map) {
         injectMenuItem();
-        String schemaRegistryEndpoint = getSchemaRegistryEndpoint(zookeeperHost);
-        if (schemaRegistryEndpoint == null || schemaRegistryEndpoint.isEmpty()) {
-            return "Missing schema registry endpoint";
-        }
+        Schema schema = null;
         try {
-            deserializers.computeIfAbsent(schemaRegistryEndpoint, key -> new KafkaAvroDeserializer(new CachedSchemaRegistryClient(key, 10)));
-            KafkaAvroDeserializer deserializer = deserializers.get(schemaRegistryEndpoint);
-            return String.valueOf(deserializer.deserialize(topic, bytes));
-        } catch (Exception e) {
-            LOGGER.error("Cannot decorate message", e);
-            return String.format("Error: %s", e);
+            schema = getSchemaFromFile(getSchemaRegistryEndpoint(zookeeperHost));
+            DatumReader<GenericRecord> reader = new GenericDatumReader<>(schema);
+            BinaryDecoder decoder = DecoderFactory.get().binaryDecoder(bytes, null);
+            GenericRecord result = reader.read(null, decoder);
+            return result.toString();
+        } catch (Exception ex) {
+            return "Zookeper: " + zookeeperHost + "Schema: " + Objects.requireNonNull(schema, "Empty Schema").toString() + '\n' + Arrays.toString(ex.getStackTrace());
         }
+    }
+
+/*    public static String readFileAsString(String fileName)throws Exception
+    {
+        String data;
+        data = new String(Files.readAllBytes(Paths.get(fileName)));
+        return data;
+    }*/
+
+    protected Schema getSchemaFromFile(final String path) throws IOException {
+        Schema.Parser parser = new Schema.Parser();
+        return parser.parse(new File(path));
     }
 
     private String getSchemaRegistryEndpoint(String zookeeperHost) {
@@ -68,7 +75,7 @@ public class AvroCustomMessageDecorator implements ICustomMessageDecorator {
                     String endpoint = JOptionPane.showInputDialog(String.format("Enter schema registry endpoint for %s", zookeeperHost));
                     if (endpoint != null && !endpoint.isEmpty()) {
                         SCHEMA_REGISTY_ENDPOINTS.setProperty(zookeeperHost, endpoint);
-                        saveProperties(SCHEMA_REGISTY_ENDPOINTS);
+                        saveProperties();
                     }
                 }
                 configurationDialogOpened.set(false);
@@ -90,17 +97,15 @@ public class AvroCustomMessageDecorator implements ICustomMessageDecorator {
                 propertiesFile.createNewFile(); //NOSONAR
             }
         } catch (Exception e) {
-            LOGGER.error("Cannot load properties", e.toString());
             JOptionPane.showMessageDialog(MainFrame.getInstance(), e.toString(), "Cannot load avro plugin properties", JOptionPane.ERROR_MESSAGE);
         }
         return properties;
     }
 
-    private static void saveProperties(Properties properties) {
+    private static void saveProperties() {
         try (FileOutputStream output = new FileOutputStream(PROPERTIES_FILE)) {
-            properties.store(output, "Schema registry per cluster endpoints");
+            AvroCustomMessageDecorator.SCHEMA_REGISTY_ENDPOINTS.store(output, "Schema registry per cluster endpoints");
         } catch (Exception e) {
-            LOGGER.error("Cannot save properties", e.toString());
             JOptionPane.showMessageDialog(MainFrame.getInstance(), e.toString(), "Cannot save avro plugin properties", JOptionPane.ERROR_MESSAGE);
         }
     }
@@ -123,12 +128,10 @@ public class AvroCustomMessageDecorator implements ICustomMessageDecorator {
         try {
             Desktop.getDesktop().edit(propertyFile);
         } catch (IOException e0) {
-            LOGGER.error("Cannot edit configuration file", e0);
             try {
                 Desktop.getDesktop().open(propertyFile);
             } catch (IOException e1) {
                 final String message = "Cannot open configuration file in editor";
-                LOGGER.error(message, e1);
                 JOptionPane.showMessageDialog(MainFrame.getInstance(), e1.toString(), message, JOptionPane.ERROR_MESSAGE);
             }
         }
